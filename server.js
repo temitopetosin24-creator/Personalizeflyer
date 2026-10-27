@@ -5,11 +5,16 @@ const path = require('node:path');
 
 const port = Number(process.env.PORT || 8000);
 const host = process.env.HOST || '127.0.0.1';
-const appFile = path.join(__dirname, 'Personalizer');
+const appFile = path.join(__dirname, 'index.html');
+const configFile = path.join(__dirname, 'config.js');
 const dataDirectory = process.env.DATA_DIR || __dirname;
 const dataFile = path.join(dataDirectory, '.personalizer-analytics.json');
 const tokenFile = path.join(dataDirectory, '.personalizer-admin-token');
-const cookieName = 'personalizer_visitor';
+const allowedOrigins = new Set((process.env.FRONTEND_ORIGINS || 'https://temitopetosin24-creator.github.io,http://localhost:8000,http://127.0.0.1:8000')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean));
+const visitorIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const visitorIds = new Set();
 const personalizedVisitorIds = new Set();
 let writeQueue = Promise.resolve();
@@ -90,16 +95,32 @@ function saveData() {
   return nextWrite;
 }
 
-function visitorIdFromRequest(request, response) {
-  const cookies = (request.headers.cookie || '').split(';');
-  const visitorCookie = cookies.map(value => value.trim()).find(value => value.startsWith(`${cookieName}=`));
-  const existingId = visitorCookie && visitorCookie.slice(cookieName.length + 1);
-  if (existingId && /^[0-9a-f-]{36}$/i.test(existingId)) return existingId;
+async function readVisitorId(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 1024) return null;
+    chunks.push(chunk);
+  }
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return typeof body.visitorId === 'string' && visitorIdPattern.test(body.visitorId) ? body.visitorId : null;
+  } catch {
+    return null;
+  }
+}
 
-  const visitorId = crypto.randomUUID();
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-  response.setHeader('Set-Cookie', `${cookieName}=${visitorId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure}`);
-  return visitorId;
+function applyCors(request, response) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  if (!allowedOrigins.has(origin)) return false;
+  response.setHeader('Access-Control-Allow-Origin', origin);
+  response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  response.setHeader('Access-Control-Max-Age', '600');
+  response.setHeader('Vary', 'Origin');
+  return true;
 }
 
 function send(response, status, body, contentType = 'application/json; charset=utf-8') {
@@ -122,9 +143,23 @@ function hasAdminToken(request, expectedToken) {
 
 async function handleRequest(request, response, adminToken) {
   const pathname = new URL(request.url, 'http://localhost').pathname;
+  const isApiRequest = pathname.startsWith('/api/');
 
-  if (request.method === 'GET' && (pathname === '/' || pathname === '/Personalizer')) {
+  if (isApiRequest && !applyCors(request, response)) {
+    send(response, 403, JSON.stringify({ error: 'Origin not allowed' }));
+    return;
+  }
+  if (isApiRequest && request.method === 'OPTIONS') {
+    send(response, 204, '');
+    return;
+  }
+
+  if (request.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
     send(response, 200, await fs.readFile(appFile), 'text/html; charset=utf-8');
+    return;
+  }
+  if (request.method === 'GET' && pathname === '/config.js') {
+    send(response, 200, await fs.readFile(configFile), 'application/javascript; charset=utf-8');
     return;
   }
   if (request.method === 'GET' && pathname === '/stats') {
@@ -132,7 +167,11 @@ async function handleRequest(request, response, adminToken) {
     return;
   }
   if (request.method === 'POST' && (pathname === '/api/visit' || pathname === '/api/personalized')) {
-    const visitorId = visitorIdFromRequest(request, response);
+    const visitorId = await readVisitorId(request);
+    if (!visitorId) {
+      send(response, 400, JSON.stringify({ error: 'A valid visitor ID is required' }));
+      return;
+    }
     const newVisitor = !visitorIds.has(visitorId);
     visitorIds.add(visitorId);
     const newCreator = pathname === '/api/personalized' && !personalizedVisitorIds.has(visitorId);
