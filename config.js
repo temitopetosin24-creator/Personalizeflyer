@@ -1,2 +1,2 @@
 // Set this to the deployed Google Apps Script Web App URL ending in /exec.
-window.PERSONALIZER_API_URL = '';
+window.PERSONALIZER_API_URL = 'https://script.google.com/macros/s/AKfycbyIaND3TOMV7QjJjmlFaPAXBTKt4iIWh4BimTf344ppuUVcoOcwaZLHbAwnNiwmi8CHsQ/exec';
